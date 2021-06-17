@@ -29,7 +29,7 @@
 
 #pragma once
 
-#include "Arduino.h"
+#include "hal.h"
 #include "inc/rptypes.h"
 #include "inc/rplidar_cmd.h"
 
@@ -53,7 +53,7 @@ public:
     ~RPLidar();
 
     // open the given serial interface and try to connect to the RPLIDAR
-    bool begin(HardwareSerial &serialobj);
+    bool begin(SerialDriver *serialobj);
 
     // close the currently opened serial interface
     void end();
@@ -88,6 +88,6 @@ protected:
     u_result _waitResponseHeader(rplidar_ans_header_t * header, _u32 timeout);
 
 protected:
-    HardwareSerial * _bined_serialdev;  
+    SerialDriver * _bined_serialdev;
     RPLidarMeasurement _currentMeasurement;
 };

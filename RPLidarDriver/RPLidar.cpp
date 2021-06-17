@@ -28,6 +28,7 @@
  */
 
 #include "RPLidar.h"
+#include "hal_serial.h"
 
 RPLidar::RPLidar()
     : _bined_serialdev(NULL)
@@ -45,21 +46,19 @@ RPLidar::~RPLidar()
 }
 
 // open the given serial interface and try to connect to the RPLIDAR
-bool RPLidar::begin(HardwareSerial &serialobj)
+bool RPLidar::begin(SerialDriver *serialobj)
 {
     if (isOpen()) {
-      end(); 
+      end();
     }
-    _bined_serialdev = &serialobj;
-    _bined_serialdev->end();
-    _bined_serialdev->begin(RPLIDAR_SERIAL_BAUDRATE);
+    _bined_serialdev = serialobj;
+    return true;
 }
 
 // close the currently opened serial interface
 void RPLidar::end()
 {
     if (isOpen()) {
-       _bined_serialdev->end();
        _bined_serialdev = NULL;
     }
 }
@@ -68,15 +67,12 @@ void RPLidar::end()
 // check whether the serial interface is opened
 bool RPLidar::isOpen()
 {
-    return _bined_serialdev?true:false; 
+    return _bined_serialdev?true:false;
 }
 
 // ask the RPLIDAR for its health info
 u_result RPLidar::getHealth(rplidar_response_device_health_t & healthinfo, _u32 timeout)
 {
-    _u32 currentTs = millis();
-    _u32 remainingtime;
-  
     _u8 *infobuf = (_u8 *)&healthinfo;
     _u8 recvPos = 0;
 
@@ -103,17 +99,7 @@ u_result RPLidar::getHealth(rplidar_response_device_health_t & healthinfo, _u32 
         if ((response_header.size) < sizeof(rplidar_response_device_health_t)) {
             return RESULT_INVALID_DATA;
         }
-        
-        while ((remainingtime=millis() - currentTs) <= timeout) {
-            int currentbyte = _bined_serialdev->read();
-            if (currentbyte < 0) continue;
-            
-            infobuf[recvPos++] = currentbyte;
-
-            if (recvPos == sizeof(rplidar_response_device_health_t)) {
-                return RESULT_OK;
-            }
-        }
+        sdReadTimeout(_bined_serialdev, infobuf, sizeof(rplidar_response_device_info_t), timeout);
     }
     return RESULT_OPERATION_TIMEOUT;
 }
@@ -121,8 +107,8 @@ u_result RPLidar::getHealth(rplidar_response_device_health_t & healthinfo, _u32 
 // ask the RPLIDAR for its device info like the serial number
 u_result RPLidar::getDeviceInfo(rplidar_response_device_info_t & info, _u32 timeout )
 {
-    _u8  recvPos = 0;
-    _u32 currentTs = millis();
+//    _u8  recvPos = 0;
+//    _u32 currentTs = millis();
     _u32 remainingtime;
     _u8 *infobuf = (_u8*)&info;
     rplidar_ans_header_t response_header;
@@ -147,18 +133,13 @@ u_result RPLidar::getDeviceInfo(rplidar_response_device_info_t & info, _u32 time
         if (response_header.size < sizeof(rplidar_response_device_info_t)) {
             return RESULT_INVALID_DATA;
         }
+        msg_t ret = sdReadTimeout(_bined_serialdev, infobuf, sizeof(rplidar_response_device_info_t), timeout);
 
-        while ((remainingtime=millis() - currentTs) <= timeout) {
-            int currentbyte = _bined_serialdev->read();
-            if (currentbyte<0) continue;    
-            infobuf[recvPos++] = currentbyte;
-
-            if (recvPos == sizeof(rplidar_response_device_info_t)) {
+            if (ret == MSG_OK) {
                 return RESULT_OK;
             }
-        }
     }
-    
+
     return RESULT_OPERATION_TIMEOUT;
 }
 
@@ -176,7 +157,7 @@ u_result RPLidar::startScan(bool force, _u32 timeout)
     u_result ans;
 
     if (!isOpen()) return RESULT_OPERATION_FAIL;
-    
+
     stop(); //force the previous operation to stop
 
     {
@@ -204,15 +185,16 @@ u_result RPLidar::startScan(bool force, _u32 timeout)
 // wait for one sample point to arrive
 u_result RPLidar::waitPoint(_u32 timeout)
 {
-   _u32 currentTs = millis();
+   _u32 currentTs = chVTGetSystemTime();
    _u32 remainingtime;
    rplidar_response_measurement_node_t node;
    _u8 *nodebuf = (_u8*)&node;
 
    _u8 recvPos = 0;
 
-   while ((remainingtime=millis() - currentTs) <= timeout) {
-        int currentbyte = _bined_serialdev->read();
+   while ((remainingtime=chVTGetSystemTime() - currentTs) <= timeout) {
+        uint8_t currentbyte;
+        sdReadTimeout(_bined_serialdev, &currentbyte, 1, timeout);
         if (currentbyte<0) continue;
 
         switch (recvPos) {
@@ -248,7 +230,7 @@ u_result RPLidar::waitPoint(_u32 timeout)
               _currentMeasurement.startBit = (node.sync_quality & RPLIDAR_RESP_MEASUREMENT_SYNCBIT);
               return RESULT_OK;
           }
-        
+
    }
 
    return RESULT_OPERATION_TIMEOUT;
@@ -271,7 +253,7 @@ u_result RPLidar::_sendCommand(_u8 cmd, const void * payload, size_t payloadsize
     header->cmd_flag = cmd;
 
     // send header first
-    _bined_serialdev->write( (uint8_t *)header, 2);
+    sdWrite(_bined_serialdev,  (uint8_t *)header, 2);
 
     if (cmd & RPLIDAR_CMDFLAG_HAS_PAYLOAD) {
         checksum ^= RPLIDAR_CMD_SYNC_BYTE;
@@ -285,13 +267,13 @@ u_result RPLidar::_sendCommand(_u8 cmd, const void * payload, size_t payloadsize
 
         // send size
         _u8 sizebyte = payloadsize;
-        _bined_serialdev->write((uint8_t *)&sizebyte, 1);
+        sdWrite(_bined_serialdev, (uint8_t *)&sizebyte, 1);
 
         // send payload
-        _bined_serialdev->write((uint8_t *)&payload, sizebyte);
+        sdWrite(_bined_serialdev, (uint8_t *)&payload, sizebyte);
 
         // send checksum
-        _bined_serialdev->write((uint8_t *)&checksum, 1);
+        sdWrite(_bined_serialdev, (uint8_t *)&checksum, 1);
 
     }
 
@@ -301,32 +283,42 @@ u_result RPLidar::_sendCommand(_u8 cmd, const void * payload, size_t payloadsize
 u_result RPLidar::_waitResponseHeader(rplidar_ans_header_t * header, _u32 timeout)
 {
     _u8  recvPos = 0;
-    _u32 currentTs = millis();
+    systime_t ticksart = chVTGetSystemTime();
     _u32 remainingtime;
     _u8 *headerbuf = (_u8*)header;
-    while ((remainingtime=millis() - currentTs) <= timeout) {
-        
-        int currentbyte = _bined_serialdev->read();
-        if (currentbyte<0) continue;
-        switch (recvPos) {
-        case 0:
-            if (currentbyte != RPLIDAR_ANS_SYNC_BYTE1) {
-                continue;
-            }
-            break;
-        case 1:
-            if (currentbyte != RPLIDAR_ANS_SYNC_BYTE2) {
-                recvPos = 0;
-                continue;
-            }
-            break;
-        }
-        headerbuf[recvPos++] = currentbyte;
 
-        if (recvPos == sizeof(rplidar_ans_header_t)) {
-            return RESULT_OK;
+    //TODO: Smart stuff
+    bool firstByteOk = false;
+    bool syncOk = false;
+    uint32_t rcvLen = 1;
+    uint8_t sync[] = {RPLIDAR_ANS_SYNC_BYTE1, RPLIDAR_ANS_SYNC_BYTE2};
+    enum State {
+        SYNC,
+        DATA
+    };
+    State state = SYNC;
+
+    while ((chVTGetSystemTime() - ticksart) <= timeout) {
+
+        msg_t ret = sdReadTimeout(_bined_serialdev, &headerbuf[recvPos], rcvLen, timeout);
+        switch (state) {
+            case SYNC:
+                if (headerbuf[recvPos] == sync[recvPos]){
+                    recvPos++;
+                    if (recvPos == 2) {
+                        rcvLen = sizeof(rplidar_ans_header_t) - 2;
+                        state = DATA;
+                    }
+                } else {
+                    recvPos = 0;
+                    continue;
+                }
+                break;
+            case DATA:
+                if(ret == MSG_OK) {
+                    return RESULT_OK;
+                }
         }
-  
 
     }
 
